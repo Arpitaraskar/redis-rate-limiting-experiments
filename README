@@ -1,0 +1,115 @@
+# Redis Rate Limiting Experiments
+
+An experimental comparison of three Redis-based rate limiters:
+
+- **Fixed Window** counter (Lua script)
+- **Token Bucket, non-atomic** (read, calculate and write sent as separate commands from Python)
+- **Token Bucket, atomic** (the same logic in one Lua script)
+
+The experiments measure **correctness under concurrent requests**, the **Fixed Window boundary burst**, and **request latency**. The full write-up is in [`paper/`](paper/Redis_Rate_Limiting_Research_Paper_Corrected.docx).
+
+## Main results
+
+| Experiment | Result |
+|---|---|
+| Token Bucket, 50 simultaneous requests, capacity 10 | Non-atomic accepted **39.23** on average (26 trials, range 20 to 50) and exceeded the capacity in every trial. Atomic accepted exactly **10** in all 25 trials. |
+| Fixed Window, 20 simultaneous requests, limit 10 | Exactly 10 accepted in all 25 trials; counter values were 1 to 20 and the final counter was 20 each time. |
+| Boundary pattern: 10 requests, then 10 more about 2 s later | Fixed Window accepted **20 of 20** in all 10 runs. Atomic Token Bucket accepted **10 of 20** in all 10 trials. |
+| Latency, 30 trials, 1,000 requests each, random order | Mean: Fixed Window 0.328 ms, atomic Token Bucket 0.338 ms, non-atomic Token Bucket 0.607 ms. Atomic was faster than non-atomic in all 30 trials. |
+
+These results come from one local Redis instance on one computer. See the paper for limitations.
+
+## Repository layout
+
+```
+.
+├── fixed_window.lua                  Fixed Window limiter (INCR + EXPIRE, atomic)
+├── atomic_token_bucket.lua           Token Bucket limiter in one Lua script
+├── fixed_window.py                   Single Fixed Window request (demo)
+├── token_bucket.py                   Non-atomic Token Bucket (Python read, calculate, write)
+│
+├── test_token_bucket.py              50-request concurrency test, non-atomic
+├── test_atomic_token_bucket.py       50-request concurrency test, atomic
+├── test_fixed_window_concurrency.py  20-request concurrency test, 25 trials
+├── test_fixed_window_boundary.py     Boundary burst test for Fixed Window
+├── test_token_bucket_boundary.py     Same two-batch pattern on the Token Bucket
+├── test_latency_v2.py                Latency test: 30 trials, random order, raw data saved
+│
+├── test_fixed_window.py              Earlier single-run concurrency test (not used in the paper)
+├── test_latency.py                   Earlier latency test: 5 trials, fixed order
+├── analyze_latency.py, plot_*.py     Earlier summary and chart scripts
+├── analyze_paper_results.py          Recomputes every number in the paper from results/
+│
+├── results/                          All CSV files and charts
+├── paper/                            The paper (.docx)
+
+```
+
+## Setup
+
+Requirements: Python 3.11, Docker, and a Redis server on `localhost:6379`.
+
+```powershell
+# 1. Start Redis (version used in the paper: 7.4.12)
+docker run -d --name research-redis -p 6379:6379 redis:7
+
+# 2. Create a virtual environment and install packages
+python -m venv venv
+venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+**Run every script from the repository root.** The scripts read the `.lua` files and write to `results/` using relative paths.
+
+## Reproduce the numbers in the paper
+
+```powershell
+python analyze_paper_results.py
+```
+
+This reads the CSV files in `results/` and prints the means, confidence intervals, percentiles, paired differences and run counts used in the paper.
+
+## Run the experiments yourself
+
+> The test scripts **append** to the CSV files in `results/`. To keep the original data safe, run them in a copy of the repository or move the existing CSV files first.
+
+| Experiment | Command | Notes |
+|---|---|---|
+| Non-atomic Token Bucket | `python test_token_bucket.py` | One trial per run. Repeat it, for example `for ($i=1; $i -le 25; $i++) { python test_token_bucket.py }` |
+| Atomic Token Bucket | `python test_atomic_token_bucket.py` | One trial per run, repeat as above |
+| Fixed Window concurrency | `python test_fixed_window_concurrency.py` | Runs 25 trials in a few seconds |
+| Fixed Window boundary | `python test_fixed_window_boundary.py` | Waits for the next minute boundary, so each run takes up to about a minute. The paper used 10 runs. |
+| Token Bucket boundary | `python test_token_bucket_boundary.py` | Runs 10 trials in about 25 seconds |
+| Latency | `python test_latency_v2.py` | 30 trials, about 2 to 3 minutes. Close other programs first. |
+
+## Data files
+
+| File | Content |
+|---|---|
+| `non_atomic_results.csv` | 26 concurrency trials. **This file has no header row.** Columns: timestamp, total requests, workers, accepted, rejected, final tokens, duration. |
+| `atomic_results.csv` | 25 concurrency trials, with a header row. |
+| `fixed_window_concurrency.csv` | 25 Fixed Window concurrency trials. |
+| `fixed_window_boundary_runs.csv` | 10 boundary runs, one row per request, with run ID and a clean-start flag. |
+| `token_bucket_boundary.csv` | 10 Token Bucket boundary trials, one row per request. |
+| `latency_v2_trials.csv` | 90 rows: one per algorithm per trial, with the position in the random order. |
+| `latency_v2_raw.csv` | 90,000 rows: the latency of every single request. |
+| `latency_trial1.csv` to `latency_trial5.csv`, `latency_summary.csv` | Earlier 5-trial latency run (fixed order). Reported in the paper for comparison only. |
+| `fixed_window_boundary.csv` | **Not used.** The first boundary run, made before the script cleared its counters. Its "before" requests were rejected because the window already held 10 requests from an earlier run. Kept for transparency. |
+| `*.png` | Charts from the earlier 5-trial latency data and the Token Bucket concurrency data. |
+
+## Environment used
+
+Windows 11, Intel Core i5-12450HX, 12 GB RAM; Redis 7.4.12 in Docker (`redis:7`); Python 3.11.4; redis-py 8.1.0.
+
+## Limitations
+
+- One local Redis instance and one client computer; no cluster, no network between machines.
+- Concurrency comes from Python threads in one process, so the exact numbers (for example 39.23 accepted) describe this setup. The direction of the result is the finding.
+- The non-atomic and atomic concurrency files have different trial counts (26 and 25). All recorded trials are included.
+- No non-atomic Fixed Window version was tested.
+- This is limiter logic only. It does not identify clients by IP or API key and does not return HTTP 429 responses.
+
+## Author
+
+Arpita Raskar. Savitribai Phule Pune University, Pune, India.
+GitHub: [@Arpitaraskar](https://github.com/Arpitaraskar)
