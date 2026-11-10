@@ -1,0 +1,10 @@
+# Python virtual environment and caches
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Duplicate archives and OS files
+*.zip
+.DS_Store
+Thumbs.db
